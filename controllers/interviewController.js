@@ -1,5 +1,6 @@
 const Interview = require('../models/Interview');
 const groqService = require('../services/groqService');
+const emailService = require('../services/emailService');
 
 const QUESTION_LIMIT = 5;
 
@@ -7,13 +8,56 @@ const QUESTION_LIMIT = 5;
 // @route   POST /api/interviews/start
 // @access  Private
 exports.startInterview = async (req, res, next) => {
-  const { technology, difficulty } = req.body;
+  const { technology, difficulty, duration, isScheduled, scheduledAt } = req.body;
 
   if (!technology || !difficulty) {
     return res.status(400).json({ success: false, message: 'Please specify technology and difficulty' });
   }
 
+  const selectedDuration = duration ? parseFloat(duration) : 1.0;
+  if (selectedDuration < 0.5 || selectedDuration > 4.0) {
+    return res.status(400).json({ success: false, message: 'Duration must be between 0.5 and 4 hours' });
+  }
+
   try {
+    if (isScheduled) {
+      if (!scheduledAt) {
+        return res.status(400).json({ success: false, message: 'Scheduled date and time is required' });
+      }
+
+      const interview = await Interview.create({
+        userId: req.user.id,
+        technology,
+        difficulty,
+        status: 'scheduled',
+        duration: selectedDuration,
+        isScheduled: true,
+        scheduledAt: new Date(scheduledAt),
+        questions: [],
+      });
+
+      // Send immediate email confirmation
+      await emailService.sendInterviewConfirmation(
+        req.user.email,
+        req.user.username,
+        interview.technology,
+        interview.difficulty,
+        interview.scheduledAt,
+        interview.duration
+      );
+
+      return res.status(201).json({
+        success: true,
+        status: 'scheduled',
+        interviewId: interview._id,
+        technology: interview.technology,
+        difficulty: interview.difficulty,
+        duration: interview.duration,
+        scheduledAt: interview.scheduledAt,
+      });
+    }
+
+    // Otherwise, start immediately
     // 1. Generate first question
     const firstQuestionText = await groqService.generateQuestion(technology, difficulty, []);
 
@@ -23,6 +67,8 @@ exports.startInterview = async (req, res, next) => {
       technology,
       difficulty,
       status: 'started',
+      duration: selectedDuration,
+      isScheduled: false,
       questions: [
         {
           questionText: firstQuestionText,
@@ -142,7 +188,6 @@ exports.getHistory = async (req, res, next) => {
   try {
     const interviews = await Interview.find({
       userId: req.user.id,
-      status: 'completed',
     }).sort({ createdAt: -1 });
 
     res.status(200).json({
@@ -167,6 +212,23 @@ exports.getInterviewDetails = async (req, res, next) => {
 
     if (!interview) {
       return res.status(404).json({ success: false, message: 'Interview session not found' });
+    }
+
+    // If the interview is scheduled and not started yet, start it now
+    if (interview.status === 'scheduled') {
+      interview.status = 'started';
+      if (interview.questions.length === 0) {
+        const firstQuestionText = await groqService.generateQuestion(
+          interview.technology,
+          interview.difficulty,
+          []
+        );
+        interview.questions.push({
+          questionText: firstQuestionText,
+          answerText: '',
+        });
+      }
+      await interview.save();
     }
 
     res.status(200).json({

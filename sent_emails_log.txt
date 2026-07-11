@@ -1,0 +1,23 @@
+
+========================================
+TIMESTAMP: 2026-07-11T06:00:42.132Z
+TO: prasadmetkar333@gmail.com
+SUBJECT: Confirmation: Your Python (Intermediate) AI Interview is scheduled
+CONTENT:
+Hi Prasad,
+
+Thank you for scheduling your Python (Intermediate) AI Interview on HireView.
+
+Your interview is confirmed for:
+- Date: Sunday, July 12, 2026
+- Time: 11:30 AM
+- Technology: Python
+- Difficulty: Intermediate
+- Duration: 1 hours
+
+You will receive a reminder email 10 minutes before the session starts.
+
+Best regards,
+The HireView Team
+========================================
+

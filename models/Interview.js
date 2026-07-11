@@ -40,8 +40,25 @@ const InterviewSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['started', 'completed'],
+      enum: ['scheduled', 'started', 'completed', 'cancelled', 'missed'],
       default: 'started',
+    },
+    duration: {
+      type: Number,
+      default: 1.0,
+      min: 0.5,
+      max: 4.0,
+    },
+    isScheduled: {
+      type: Boolean,
+      default: false,
+    },
+    scheduledAt: {
+      type: Date,
+    },
+    reminderSent: {
+      type: Boolean,
+      default: false,
     },
     questions: [QuestionSchema],
     overallFeedback: {
