@@ -8,10 +8,29 @@ const QUESTION_LIMIT = 5;
 // @route   POST /api/interviews/start
 // @access  Private
 exports.startInterview = async (req, res, next) => {
-  const { technology, difficulty, duration, isScheduled, scheduledAt } = req.body;
+  const {
+    interviewType = 'Technical',
+    technology,
+    difficulty,
+    experience,
+    duration = 1.0,
+    isScheduled = false,
+    scheduledAt,
+    interviewerConfig = {
+      avatar: 'professional_male',
+      voiceURI: '',
+      region: 'Default',
+      style: 'Professional',
+      speed: 1.0
+    }
+  } = req.body;
 
-  if (!technology || !difficulty) {
-    return res.status(400).json({ success: false, message: 'Please specify technology and difficulty' });
+  if (interviewType === 'Technical' && (!technology || !difficulty)) {
+    return res.status(400).json({ success: false, message: 'Please specify technology and difficulty for a technical interview' });
+  }
+
+  if (interviewType === 'HR' && !difficulty) {
+    return res.status(400).json({ success: false, message: 'Please specify the level for the HR interview' });
   }
 
   const selectedDuration = duration ? parseFloat(duration) : 1.0;
@@ -27,12 +46,16 @@ exports.startInterview = async (req, res, next) => {
 
       const interview = await Interview.create({
         userId: req.user.id,
-        technology,
+        interviewType,
+        technology: interviewType === 'Technical' ? technology : undefined,
         difficulty,
         status: 'scheduled',
+        currentPhase: interviewType === 'HR' ? 'greeting' : 'fundamentals',
         duration: selectedDuration,
+        experience: experience || 0,
         isScheduled: true,
         scheduledAt: new Date(scheduledAt),
+        interviewerConfig,
         questions: [],
       });
 
@@ -40,7 +63,7 @@ exports.startInterview = async (req, res, next) => {
       await emailService.sendInterviewConfirmation(
         req.user.email,
         req.user.username,
-        interview.technology,
+        interview.technology || 'HR',
         interview.difficulty,
         interview.scheduledAt,
         interview.duration
@@ -50,6 +73,7 @@ exports.startInterview = async (req, res, next) => {
         success: true,
         status: 'scheduled',
         interviewId: interview._id,
+        interviewType: interview.interviewType,
         technology: interview.technology,
         difficulty: interview.difficulty,
         duration: interview.duration,
@@ -59,19 +83,38 @@ exports.startInterview = async (req, res, next) => {
 
     // Otherwise, start immediately
     // 1. Generate first question
-    const firstQuestionText = await groqService.generateQuestion(technology, difficulty, []);
+    let firstQuestionData;
+    if (interviewType === 'HR') {
+      firstQuestionData = await groqService.generateHRQuestion(difficulty, experience || 0, 'greeting', []);
+    } else {
+      firstQuestionData = await groqService.generateQuestion(technology, difficulty, experience || 0, 'fundamentals', []);
+    }
 
     // 2. Create Interview session in DB
+    const startedAt = new Date();
+    const endsAt = new Date(startedAt.getTime() + selectedDuration * 60 * 60 * 1000);
+
     const interview = await Interview.create({
       userId: req.user.id,
-      technology,
+      interviewType,
+      technology: interviewType === 'Technical' ? technology : undefined,
       difficulty,
+      experience: experience || 0,
       status: 'started',
+      currentPhase: interviewType === 'HR' ? 'greeting' : 'fundamentals',
       duration: selectedDuration,
       isScheduled: false,
+      startedAt,
+      endsAt,
+      interviewerConfig,
       questions: [
         {
-          questionText: firstQuestionText,
+          questionText: firstQuestionData.questionText || firstQuestionData,
+          expectedAnswer: firstQuestionData.expectedAnswer || '',
+          difficulty: firstQuestionData.difficulty || difficulty,
+          topic: firstQuestionData.topic || '',
+          skillsTested: firstQuestionData.skillsTested || [],
+          questionType: firstQuestionData.questionType || 'conceptual',
           answerText: '',
         },
       ],
@@ -80,10 +123,11 @@ exports.startInterview = async (req, res, next) => {
     res.status(201).json({
       success: true,
       interviewId: interview._id,
+      interviewType: interview.interviewType,
       technology: interview.technology,
       difficulty: interview.difficulty,
       questionIndex: 0,
-      question: firstQuestionText,
+      question: firstQuestionData.questionText || firstQuestionData,
       totalQuestions: QUESTION_LIMIT,
     });
   } catch (error) {
@@ -217,14 +261,35 @@ exports.getInterviewDetails = async (req, res, next) => {
     // If the interview is scheduled and not started yet, start it now
     if (interview.status === 'scheduled') {
       interview.status = 'started';
+      interview.startedAt = new Date();
+      interview.endsAt = new Date(interview.startedAt.getTime() + (interview.duration || 1.0) * 60 * 60 * 1000);
+
       if (interview.questions.length === 0) {
-        const firstQuestionText = await groqService.generateQuestion(
-          interview.technology,
-          interview.difficulty,
-          []
-        );
+        let firstQuestionData;
+        if (interview.interviewType === 'HR') {
+          firstQuestionData = await groqService.generateHRQuestion(
+            interview.difficulty,
+            interview.experience || 0,
+            interview.currentPhase || 'greeting',
+            []
+          );
+        } else {
+          firstQuestionData = await groqService.generateQuestion(
+            interview.technology,
+            interview.difficulty,
+            interview.experience || 0,
+            interview.currentPhase || 'fundamentals',
+            []
+          );
+        }
+        
         interview.questions.push({
-          questionText: firstQuestionText,
+          questionText: firstQuestionData.questionText || firstQuestionData,
+          expectedAnswer: firstQuestionData.expectedAnswer || '',
+          difficulty: firstQuestionData.difficulty || interview.difficulty,
+          topic: firstQuestionData.topic || '',
+          skillsTested: firstQuestionData.skillsTested || [],
+          questionType: firstQuestionData.questionType || 'conceptual',
           answerText: '',
         });
       }

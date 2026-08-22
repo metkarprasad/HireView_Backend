@@ -15,9 +15,9 @@ const InterviewAnalytics = require('../models/InterviewAnalytics');
  * @returns {Promise<Object>} The attempt document.
  */
 async function createOrGetActiveAttempt(interviewId, userId) {
-  let attempt = await InterviewAttempt.findOne({ interview: interviewId, user: userId, status: 'inProgress' });
+  let attempt = await InterviewAttempt.findOne({ interviewId: interviewId, userId: userId, status: 'started' });
   if (!attempt) {
-    attempt = await InterviewAttempt.create({ interview: interviewId, user: userId, status: 'inProgress', startedAt: Date.now() });
+    attempt = await InterviewAttempt.create({ interviewId: interviewId, userId: userId, status: 'started', startedAt: Date.now() });
   }
   return attempt;
 }
@@ -27,8 +27,8 @@ async function createOrGetActiveAttempt(interviewId, userId) {
  */
 async function startAttempt(interviewId, userId) {
   // Close any existing in‑progress attempts first
-  await InterviewAttempt.updateMany({ interview: interviewId, user: userId, status: 'inProgress' }, { status: 'completed', endedAt: Date.now() });
-  const attempt = await InterviewAttempt.create({ interview: interviewId, user: userId, status: 'inProgress', startedAt: Date.now() });
+  await InterviewAttempt.updateMany({ interviewId: interviewId, userId: userId, status: 'started' }, { status: 'completed', endedAt: Date.now() });
+  const attempt = await InterviewAttempt.create({ interviewId: interviewId, userId: userId, status: 'started', startedAt: Date.now() });
   return attempt;
 }
 
@@ -52,7 +52,7 @@ async function getNextQuestion(attemptId) {
  */
 async function evaluateAnswer(attemptId, answer) {
   // Store the answer as an event for audit.
-  await InterviewEvent.create({ attempt: attemptId, type: 'answer', payload: { answer }, createdAt: Date.now() });
+  await InterviewEvent.create({ attemptId: attemptId, type: 'answer', details: { answer } });
   // Mock feedback
   return {
     score: 8,
@@ -66,7 +66,7 @@ async function evaluateAnswer(attemptId, answer) {
  */
 async function generateReport(attemptId) {
   // Aggregate events for a very simple report.
-  const events = await InterviewEvent.find({ attempt: attemptId });
+  const events = await InterviewEvent.find({ attemptId: attemptId });
   const totalAnswers = events.filter(e => e.type === 'answer').length;
   return {
     attemptId,
