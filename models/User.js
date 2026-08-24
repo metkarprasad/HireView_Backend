@@ -24,6 +24,38 @@ const UserSchema = new mongoose.Schema(
       minlength: 6,
       select: false, // Prevents returning password by default
     },
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
+    status: {
+      type: String,
+      enum: ['PENDING_VERIFICATION', 'ACTIVE', 'INACTIVE'],
+      default: 'PENDING_VERIFICATION',
+    },
+    otpHash: {
+      type: String,
+    },
+    otpPurpose: {
+      type: String,
+      enum: ['EMAIL_VERIFICATION', 'FORGOT_PASSWORD'],
+    },
+    otpExpiresAt: {
+      type: Date,
+    },
+    otpAttempts: {
+      type: Number,
+      default: 0,
+    },
+    otpLastSentAt: {
+      type: Date,
+    },
+    resetAuthorizationToken: {
+      type: String,
+    },
+    resetAuthorizationExpiresAt: {
+      type: Date,
+    },
     resetPasswordToken: String,
     resetPasswordExpire: Date,
   },

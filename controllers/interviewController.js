@@ -1,8 +1,71 @@
 const Interview = require('../models/Interview');
+const InterviewAttempt = require('../models/InterviewAttempt');
+const InterviewAnalytics = require('../models/InterviewAnalytics');
 const groqService = require('../services/groqService');
 const emailService = require('../services/emailService');
 
 const QUESTION_LIMIT = 5;
+
+/**
+ * Helper to finalize interview completion idempotently and persist attempt & analytics
+ */
+async function finalizeInterviewCompletion(interview, userId) {
+  if (interview.status === 'completed' && interview.overallFeedback?.score !== undefined) {
+    return interview.overallFeedback;
+  }
+
+  interview.status = 'completed';
+  interview.endsAt = new Date();
+
+  // Generate overall evaluation report
+  let overallReport;
+  if (interview.interviewType === 'HR') {
+    overallReport = await groqService.generateOverallHRReport(
+      interview.difficulty,
+      interview.questions
+    );
+  } else {
+    overallReport = await groqService.generateOverallReport(
+      interview.technology || 'General',
+      interview.difficulty,
+      interview.questions
+    );
+  }
+
+  interview.overallFeedback = overallReport;
+  await interview.save();
+
+  // Synchronize InterviewAttempt record
+  const attempt = await InterviewAttempt.findOneAndUpdate(
+    { interviewId: interview._id, userId: userId },
+    {
+      interviewId: interview._id,
+      userId: userId,
+      status: 'completed',
+      endedAt: new Date(),
+    },
+    { upsert: true, new: true }
+  );
+
+  // Synchronize InterviewAnalytics record
+  if (attempt) {
+    await InterviewAnalytics.findOneAndUpdate(
+      { attemptId: attempt._id },
+      {
+        attemptId: attempt._id,
+        overallScore: overallReport.score || 0,
+        technicalScore: interview.interviewType === 'Technical' ? (overallReport.score || 0) : undefined,
+        communicationScore: overallReport.communication || undefined,
+        strengths: overallReport.strengths || [],
+        weaknesses: overallReport.weakAreas || [],
+        improvementSuggestions: overallReport.studyTopics || [],
+      },
+      { upsert: true, new: true }
+    );
+  }
+
+  return overallReport;
+}
 
 // @desc    Start a new interview session and get first question
 // @route   POST /api/interviews/start
@@ -59,15 +122,33 @@ exports.startInterview = async (req, res, next) => {
         questions: [],
       });
 
-      // Send immediate email confirmation
-      await emailService.sendInterviewConfirmation(
-        req.user.email,
-        req.user.username,
-        interview.technology || 'HR',
-        interview.difficulty,
-        interview.scheduledAt,
-        interview.duration
+      // Synchronize InterviewAttempt record
+      await InterviewAttempt.findOneAndUpdate(
+        { interviewId: interview._id, userId: req.user.id },
+        {
+          interviewId: interview._id,
+          userId: req.user.id,
+          status: 'scheduled',
+          isScheduled: true,
+          scheduledAt: interview.scheduledAt,
+          durationHours: selectedDuration,
+        },
+        { upsert: true, new: true }
       );
+
+      // Send immediate email confirmation
+      try {
+        await emailService.sendInterviewConfirmation(
+          req.user.email,
+          req.user.username,
+          interview.technology || 'HR',
+          interview.difficulty,
+          interview.scheduledAt,
+          interview.duration
+        );
+      } catch (mailErr) {
+        console.warn('Email confirmation failed to send:', mailErr.message);
+      }
 
       return res.status(201).json({
         success: true,
@@ -115,10 +196,27 @@ exports.startInterview = async (req, res, next) => {
           topic: firstQuestionData.topic || '',
           skillsTested: firstQuestionData.skillsTested || [],
           questionType: firstQuestionData.questionType || 'conceptual',
+          codingRequired: firstQuestionData.codingRequired || false,
+          language: firstQuestionData.language || '',
+          starterCode: firstQuestionData.starterCode || '',
           answerText: '',
         },
       ],
     });
+
+    // Synchronize InterviewAttempt record
+    await InterviewAttempt.findOneAndUpdate(
+      { interviewId: interview._id, userId: req.user.id },
+      {
+        interviewId: interview._id,
+        userId: req.user.id,
+        status: 'started',
+        isScheduled: false,
+        startedAt,
+        durationHours: selectedDuration,
+      },
+      { upsert: true, new: true }
+    );
 
     res.status(201).json({
       success: true,
@@ -153,64 +251,91 @@ exports.submitAnswer = async (req, res, next) => {
     }
 
     if (interview.status === 'completed') {
-      return res.status(400).json({ success: false, message: 'Interview session is already completed' });
+      return res.status(200).json({
+        success: true,
+        status: 'completed',
+        overallReport: interview.overallFeedback,
+        interviewId: interview._id,
+      });
     }
 
     const currentQuestionIndex = interview.questions.length - 1;
     const currentQuestion = interview.questions[currentQuestionIndex];
 
     // 1. Evaluate current answer
-    const feedback = await groqService.evaluateAnswer(
-      currentQuestion.questionText,
-      answerText,
-      interview.technology,
-      interview.difficulty
-    );
+    let feedback;
+    if (interview.interviewType === 'HR') {
+      feedback = await groqService.evaluateHRAnswer(
+        currentQuestion.questionText,
+        answerText,
+        interview.difficulty
+      );
+    } else {
+      feedback = await groqService.evaluateAnswer(
+        {
+          questionText: currentQuestion.questionText,
+          expectedAnswer: currentQuestion.expectedAnswer,
+          questionType: currentQuestion.questionType,
+          codingRequired: currentQuestion.codingRequired,
+        },
+        answerText,
+        interview.technology,
+        interview.difficulty
+      );
+    }
 
     // Update current question with user's response and feedback
     currentQuestion.answerText = answerText;
     currentQuestion.feedback = feedback;
 
-    let nextQuestion = null;
-    let overallReport = null;
-
     // 2. Decide if we should generate next question or compile overall report
     if (interview.questions.length < QUESTION_LIMIT) {
       // Generate next question
-      nextQuestion = await groqService.generateQuestion(
-        interview.technology,
-        interview.difficulty,
-        interview.questions
-      );
-      
+      let nextQuestionData;
+      if (interview.interviewType === 'HR') {
+        nextQuestionData = await groqService.generateHRQuestion(
+          interview.difficulty,
+          interview.experience || 0,
+          interview.currentPhase || 'greeting',
+          interview.questions
+        );
+      } else {
+        nextQuestionData = await groqService.generateQuestion(
+          interview.technology,
+          interview.difficulty,
+          interview.experience || 0,
+          interview.currentPhase || 'fundamentals',
+          interview.questions
+        );
+      }
+
       interview.questions.push({
-        questionText: nextQuestion,
+        phase: interview.currentPhase,
+        questionText: nextQuestionData.questionText || nextQuestionData,
+        expectedAnswer: nextQuestionData.expectedAnswer || '',
+        difficulty: nextQuestionData.difficulty || interview.difficulty,
+        topic: nextQuestionData.topic || '',
+        skillsTested: nextQuestionData.skillsTested || [],
+        questionType: nextQuestionData.questionType || 'conceptual',
+        codingRequired: nextQuestionData.codingRequired || false,
+        language: nextQuestionData.language || '',
+        starterCode: nextQuestionData.starterCode || '',
         answerText: '',
       });
-      
+
       await interview.save();
 
       res.status(200).json({
         success: true,
         status: 'ongoing',
         feedback: currentQuestion.feedback,
-        nextQuestion: nextQuestion,
-        questionIndex: interview.questions.length - 1, // index of next question
+        nextQuestion: nextQuestionData.questionText || nextQuestionData,
+        questionIndex: interview.questions.length - 1,
         totalQuestions: QUESTION_LIMIT,
       });
     } else {
       // Complete the interview session
-      interview.status = 'completed';
-
-      // Generate overall evaluation report
-      overallReport = await groqService.generateOverallReport(
-        interview.technology,
-        interview.difficulty,
-        interview.questions
-      );
-
-      interview.overallFeedback = overallReport;
-      await interview.save();
+      const overallReport = await finalizeInterviewCompletion(interview, req.user.id);
 
       res.status(200).json({
         success: true,
@@ -220,6 +345,30 @@ exports.submitAnswer = async (req, res, next) => {
         interviewId: interview._id,
       });
     }
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Manually or idempotently complete an interview session and generate final report
+// @route   POST /api/interviews/:id/complete
+// @access  Private
+exports.completeInterview = async (req, res, next) => {
+  try {
+    const interview = await Interview.findOne({ _id: req.params.id, userId: req.user.id });
+    if (!interview) {
+      return res.status(404).json({ success: false, message: 'Interview session not found' });
+    }
+
+    const overallReport = await finalizeInterviewCompletion(interview, req.user.id);
+
+    return res.status(200).json({
+      success: true,
+      status: 'completed',
+      interviewId: interview._id,
+      overallReport: overallReport || interview.overallFeedback,
+      interview,
+    });
   } catch (error) {
     next(error);
   }
@@ -282,7 +431,7 @@ exports.getInterviewDetails = async (req, res, next) => {
             []
           );
         }
-        
+
         interview.questions.push({
           questionText: firstQuestionData.questionText || firstQuestionData,
           expectedAnswer: firstQuestionData.expectedAnswer || '',
@@ -290,10 +439,20 @@ exports.getInterviewDetails = async (req, res, next) => {
           topic: firstQuestionData.topic || '',
           skillsTested: firstQuestionData.skillsTested || [],
           questionType: firstQuestionData.questionType || 'conceptual',
+          codingRequired: firstQuestionData.codingRequired || false,
+          language: firstQuestionData.language || '',
+          starterCode: firstQuestionData.starterCode || '',
           answerText: '',
         });
       }
       await interview.save();
+
+      // Update attempt to started
+      await InterviewAttempt.findOneAndUpdate(
+        { interviewId: interview._id, userId: req.user.id },
+        { status: 'started', startedAt: interview.startedAt },
+        { upsert: true, new: true }
+      );
     }
 
     res.status(200).json({
@@ -313,7 +472,7 @@ exports.getAnalytics = async (req, res, next) => {
     const interviews = await Interview.find({
       userId: req.user.id,
       status: 'completed',
-    });
+    }).sort({ createdAt: 1 }); // chronological order for line chart
 
     if (interviews.length === 0) {
       return res.status(200).json({
@@ -321,7 +480,7 @@ exports.getAnalytics = async (req, res, next) => {
         summary: {
           totalCompleted: 0,
           averageScore: 0,
-          difficultyDistribution: {},
+          difficultyDistribution: { Beginner: 0, Intermediate: 0, Advanced: 0, Senior: 0 },
           techScores: [],
           scoreHistory: [],
         },
@@ -335,29 +494,28 @@ exports.getAnalytics = async (req, res, next) => {
     );
 
     // 2. Score History (Chronological)
-    const scoreHistory = interviews
-      .map((item) => ({
-        date: item.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-        score: item.overallFeedback?.score || 0,
-        tech: item.technology,
-      }))
-      .reverse(); // newest last for line chart
+    const scoreHistory = interviews.map((item) => ({
+      date: item.createdAt ? item.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'Recent',
+      score: item.overallFeedback?.score || 0,
+      tech: item.interviewType === 'HR' ? 'HR' : (item.technology || 'Technical'),
+      difficulty: item.difficulty,
+    }));
 
-    // 3. Technology scores
+    // 3. Technology / Track proficiency scores & Difficulty distribution
     const techGroups = {};
-    const difficultyDist = { Beginner: 0, Intermediate: 0, Advanced: 0 };
+    const difficultyDist = { Beginner: 0, Intermediate: 0, Advanced: 0, Senior: 0 };
 
     interviews.forEach((item) => {
-      // Tech grouping
-      if (!techGroups[item.technology]) {
-        techGroups[item.technology] = { sum: 0, count: 0 };
-      }
-      techGroups[item.technology].sum += item.overallFeedback?.score || 0;
-      techGroups[item.technology].count += 1;
+      const techKey = item.interviewType === 'HR' ? 'HR Interview' : (item.technology || 'Technical');
 
-      // Difficulty distribution
-      if (difficultyDist[item.difficulty] !== undefined) {
-        difficultyDist[item.difficulty] += 1;
+      if (!techGroups[techKey]) {
+        techGroups[techKey] = { sum: 0, count: 0 };
+      }
+      techGroups[techKey].sum += item.overallFeedback?.score || 0;
+      techGroups[techKey].count += 1;
+
+      if (item.difficulty) {
+        difficultyDist[item.difficulty] = (difficultyDist[item.difficulty] || 0) + 1;
       }
     });
 
@@ -381,3 +539,6 @@ exports.getAnalytics = async (req, res, next) => {
     next(error);
   }
 };
+
+exports.finalizeInterviewCompletion = finalizeInterviewCompletion;
+exports.QUESTION_LIMIT = QUESTION_LIMIT;

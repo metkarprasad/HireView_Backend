@@ -17,21 +17,26 @@ const getMockQuestion = (technology, difficulty, index) => {
 };
 
 const getMockEvaluation = (question, answer) => {
-  const score = answer.length > 50 ? 80 : 50; 
+  const score = answer && answer.length > 50 ? 80 : 50; 
+  const expected = typeof question === 'object' ? (question.expectedAnswer || '') : '';
   return {
     correctness: score,
     technicalAccuracy: score - 5,
     completeness: score + 5,
     score: score,
+    maxScore: 100,
+    percentage: score,
     comments: "Fallback evaluation: The candidate provided a basic response but more specific technical depth is needed.",
     strengths: "Addressed the general topic.",
-    weakAreas: "Missed advanced technical details and edge cases."
+    weakAreas: "Missed advanced technical details and edge cases.",
+    improvements: expected ? `Recommended approach: ${expected}` : "Review official documentation and standard design patterns."
   };
 };
 
 const getMockReport = (questions) => {
-  const totalScore = questions.reduce((sum, q) => sum + (q.feedback?.score || 60), 0);
-  const averagePercentage = questions.length > 0 ? Math.round(totalScore / questions.length) : 0;
+  const evaluated = questions.filter(q => q.feedback && q.feedback.score !== undefined);
+  const totalScore = evaluated.reduce((sum, q) => sum + (q.feedback?.score || 0), 0);
+  const averagePercentage = evaluated.length > 0 ? Math.round(totalScore / evaluated.length) : 0;
   
   return {
     score: averagePercentage,
@@ -341,7 +346,22 @@ Return your response STRICTLY as a JSON object with the following fields:
 
 exports.evaluateHRAnswer = async (questionText, answerText, difficulty) => {
   if (!answerText || answerText.trim().length === 0) {
-    return { score: 0, communication: 0, professionalism: 0, clarity: 0, teamwork: 0, adaptability: 0, selfAwareness: 0, careerMotivation: 0, comments: "No answer provided.", strengths: "None", weakAreas: "Failed to answer." };
+    return {
+      score: 0,
+      maxScore: 100,
+      percentage: 0,
+      communication: 0,
+      professionalism: 0,
+      clarity: 0,
+      teamwork: 0,
+      adaptability: 0,
+      selfAwareness: 0,
+      careerMotivation: 0,
+      comments: "No answer provided.",
+      strengths: "None",
+      weakAreas: "Failed to answer.",
+      improvements: "Provide a structured answer using the STAR method (Situation, Task, Action, Result)."
+    };
   }
 
   try {
@@ -354,7 +374,8 @@ TARGET ROLE LEVEL: ${difficulty}
 EVALUATION CRITERIA:
 - Do NOT evaluate technical coding correctness.
 - Evaluate based on communication, clarity, professionalism, self-awareness, teamwork, adaptability, and relevance.
-- Provide constructive, evidence-based feedback. Do not make unsupported judgments about personality (e.g. "dishonest").
+- Provide constructive, evidence-based feedback. Do not make unsupported judgments about personality.
+- Provide clear Recommended Solution & Core Theory improvements for the candidate.
 
 Return your evaluation STRICTLY as a JSON object with the following fields:
 {
@@ -368,46 +389,78 @@ Return your evaluation STRICTLY as a JSON object with the following fields:
   "careerMotivation": <score 0-100>,
   "comments": "Detailed feedback on the response",
   "strengths": "What they did well",
-  "weakAreas": "What they can improve"
+  "weakAreas": "What they can improve",
+  "improvements": "Recommended approach, model response strategy, or communication tips"
 }`;
 
     const rawResponse = await callGroqAPI([{ role: "user", content: prompt }], true);
     const result = cleanJSONResponse(rawResponse);
+    const rawScore = typeof result.score === 'number' ? result.score : (parseInt(result.score, 10) || 0);
+    const boundedScore = Math.max(0, Math.min(100, rawScore));
+
     return {
-      score: result.score || 0,
-      communication: result.communication || 0,
-      professionalism: result.professionalism || 0,
-      clarity: result.clarity || 0,
-      teamwork: result.teamwork || 0,
-      adaptability: result.adaptability || 0,
-      selfAwareness: result.selfAwareness || 0,
-      careerMotivation: result.careerMotivation || 0,
-      comments: result.comments || 'Evaluated',
-      strengths: result.strengths || 'N/A',
-      weakAreas: result.weakAreas || 'N/A'
+      score: boundedScore,
+      maxScore: 100,
+      percentage: boundedScore,
+      communication: Math.max(0, Math.min(100, Number(result.communication) || boundedScore)),
+      professionalism: Math.max(0, Math.min(100, Number(result.professionalism) || boundedScore)),
+      clarity: Math.max(0, Math.min(100, Number(result.clarity) || boundedScore)),
+      teamwork: Math.max(0, Math.min(100, Number(result.teamwork) || boundedScore)),
+      adaptability: Math.max(0, Math.min(100, Number(result.adaptability) || boundedScore)),
+      selfAwareness: Math.max(0, Math.min(100, Number(result.selfAwareness) || boundedScore)),
+      careerMotivation: Math.max(0, Math.min(100, Number(result.careerMotivation) || boundedScore)),
+      comments: result.comments || 'Evaluated successfully.',
+      strengths: result.strengths || 'Demonstrated conversational communication.',
+      weakAreas: result.weakAreas || 'Can provide more concrete workplace examples.',
+      improvements: result.improvements || result.weakAreas || 'Use the STAR methodology to clearly highlight concrete results in behavioural answers.'
     };
   } catch (error) {
     console.error("HR Evaluation Error:", error.message);
-    return { score: 70, communication: 70, professionalism: 70, clarity: 70, teamwork: 70, adaptability: 70, selfAwareness: 70, careerMotivation: 70, comments: "Default evaluation applied due to system error.", strengths: "N/A", weakAreas: "N/A" };
+    const fallbackScore = answerText.trim().length > 30 ? 70 : 40;
+    return {
+      score: fallbackScore,
+      maxScore: 100,
+      percentage: fallbackScore,
+      communication: fallbackScore,
+      professionalism: fallbackScore,
+      clarity: fallbackScore,
+      teamwork: fallbackScore,
+      adaptability: fallbackScore,
+      selfAwareness: fallbackScore,
+      careerMotivation: fallbackScore,
+      comments: "Evaluation recorded.",
+      strengths: "Addressed the question.",
+      weakAreas: "Could articulate thoughts with more specific examples.",
+      improvements: "Structure responses clearly with the STAR framework (Situation, Task, Action, Result)."
+    };
   }
 };
 
-exports.generateOverallHRReport = async (difficulty, questions) => {
+exports.generateOverallHRReport = async (difficulty, questions = []) => {
   try {
-    const averageScore = Math.round(questions.reduce((sum, q) => sum + (q.feedback?.score || 0), 0) / (questions.length || 1));
-    const averageCommunication = Math.round(questions.reduce((sum, q) => sum + (q.feedback?.communication || 0), 0) / (questions.length || 1));
-    const averageProfessionalism = Math.round(questions.reduce((sum, q) => sum + (q.feedback?.professionalism || 0), 0) / (questions.length || 1));
+    const evaluatedQuestions = questions.filter(q => q.feedback && q.feedback.score !== undefined);
+    const calculatedAvg = evaluatedQuestions.length > 0
+      ? Math.round(evaluatedQuestions.reduce((sum, q) => sum + (q.feedback?.score || 0), 0) / evaluatedQuestions.length)
+      : 0;
+
+    const averageCommunication = evaluatedQuestions.length > 0
+      ? Math.round(evaluatedQuestions.reduce((sum, q) => sum + (q.feedback?.communication || q.feedback?.score || 0), 0) / evaluatedQuestions.length)
+      : 0;
+
+    const averageProfessionalism = evaluatedQuestions.length > 0
+      ? Math.round(evaluatedQuestions.reduce((sum, q) => sum + (q.feedback?.professionalism || q.feedback?.score || 0), 0) / evaluatedQuestions.length)
+      : 0;
     
-    // We can use AI to summarize strengths and weak areas
     const prompt = `You are a Senior HR Manager. Generate a final HR interview report based on the candidate's performance across ${questions.length} questions.
     
-    Overall Score: ${averageScore}/100
+    Overall Score: ${calculatedAvg}/100
     Average Communication: ${averageCommunication}/100
     Average Professionalism: ${averageProfessionalism}/100
     Target Level: ${difficulty}
     
     Return STRICTLY as JSON:
     {
+      "score": ${calculatedAvg},
       "strengths": ["string point 1", "string point 2"],
       "weakAreas": ["string point 1", "string point 2"],
       "studyTopics": ["Focus area 1", "Focus area 2"]
@@ -416,37 +469,59 @@ exports.generateOverallHRReport = async (difficulty, questions) => {
     const rawResponse = await callGroqAPI([{ role: "user", content: prompt }], true);
     const parsed = cleanJSONResponse(rawResponse);
     return {
-      score: averageScore,
+      score: typeof parsed.score === 'number' ? Math.max(0, Math.min(100, parsed.score)) : calculatedAvg,
       communication: averageCommunication,
       professionalism: averageProfessionalism,
-      strengths: parsed.strengths || [],
-      weakAreas: parsed.weakAreas || [],
-      studyTopics: parsed.studyTopics || []
+      strengths: Array.isArray(parsed.strengths) && parsed.strengths.length > 0 ? parsed.strengths : ["Completed the HR interview round with clear articulation."],
+      weakAreas: Array.isArray(parsed.weakAreas) && parsed.weakAreas.length > 0 ? parsed.weakAreas : ["Refine situational examples to focus on measurable business impact."],
+      studyTopics: Array.isArray(parsed.studyTopics) && parsed.studyTopics.length > 0 ? parsed.studyTopics : ["Behavioural Interview Techniques", "STAR Methodology"]
     };
   } catch (err) {
+    const evaluatedQuestions = questions.filter(q => q.feedback && q.feedback.score !== undefined);
+    const calculatedAvg = evaluatedQuestions.length > 0
+      ? Math.round(evaluatedQuestions.reduce((sum, q) => sum + (q.feedback?.score || 0), 0) / evaluatedQuestions.length)
+      : 70;
     return {
-      score: 75,
-      communication: 75,
-      professionalism: 75,
-      strengths: ["Completed the HR round"],
-      weakAreas: [],
-      studyTopics: []
+      score: calculatedAvg,
+      communication: calculatedAvg,
+      professionalism: calculatedAvg,
+      strengths: ["Completed the HR round."],
+      weakAreas: ["Continue refining structured communication."],
+      studyTopics: ["STAR Framework", "Executive Communication"]
     };
   }
 };
 
 exports.evaluateAnswer = async (questionData, answer, technology, difficulty) => {
+  const isQuestionObj = typeof questionData === 'object' && questionData !== null;
+  const questionText = isQuestionObj ? (questionData.questionText || '') : String(questionData || '');
+  const expectedAnswer = isQuestionObj ? (questionData.expectedAnswer || '') : '';
+  const isCoding = isQuestionObj && (questionData.questionType === 'coding' || questionData.codingRequired);
+
+  if (!answer || answer.trim().length === 0) {
+    return {
+      correctness: 0,
+      technicalAccuracy: 0,
+      completeness: 0,
+      score: 0,
+      maxScore: 100,
+      percentage: 0,
+      comments: "No answer provided.",
+      strengths: "None",
+      weakAreas: "Question was not answered.",
+      improvements: expectedAnswer ? `Recommended Solution: ${expectedAnswer}` : `Review core ${technology} concepts and standard documentation.`
+    };
+  }
+
   try {
-    const isCoding = questionData.questionType === 'coding' || questionData.codingRequired;
-    
     let prompt = '';
     if (isCoding) {
       prompt = `You are a senior technical interviewer evaluating a candidate's submitted code.
 Technology: ${technology}
 Level: ${difficulty}
 
-Coding Question: ${questionData.questionText || questionData}
-Expected Ideal Approach: ${questionData.expectedAnswer || 'N/A'}
+Coding Question: ${questionText}
+Expected Ideal Approach: ${expectedAnswer || 'Optimal, bug-free implementation with consideration of edge cases.'}
 
 Candidate's Submitted Code:
 \`\`\`
@@ -455,7 +530,8 @@ ${answer}
 
 EVALUATION INSTRUCTIONS:
 1. Evaluate code correctness, logic, time/space complexity, edge cases, and code quality.
-2. Do not execute the code, but statically analyze it for bugs.
+2. Provide a score from 0-100.
+3. In "improvements", provide the recommended solution, optimal code pattern, or core theory principles.
 
 OUTPUT FORMAT (STRICT JSON):
 {
@@ -465,21 +541,23 @@ OUTPUT FORMAT (STRICT JSON):
   "score": <number 0-100>,
   "comments": "Overall summary of their code.",
   "strengths": "Specific algorithms or clean patterns they used.",
-  "weakAreas": "Bugs, inefficiencies, or missing edge cases."
+  "weakAreas": "Bugs, inefficiencies, or missing edge cases.",
+  "improvements": "Recommended solution pattern and core theoretical explanation."
 }`;
     } else {
       prompt = `You are a senior technical interviewer evaluating a candidate's verbal response.
 Technology: ${technology}
 Level: ${difficulty}
 
-Question Asked: ${questionData.questionText || questionData}
-Expected Ideal Answer: ${questionData.expectedAnswer || 'N/A'}
+Question Asked: ${questionText}
+Expected Ideal Answer: ${expectedAnswer || 'Thorough conceptual explanation with practical context.'}
 
 Candidate's Answer: ${answer}
 
 EVALUATION INSTRUCTIONS:
 1. Evaluate semantic correctness, not exact wording.
-2. Be fair but technically rigorous.
+2. Provide a score from 0-100.
+3. In "improvements", provide the Recommended Solution & Core Theory details that would make for a 100% ideal answer.
 
 OUTPUT FORMAT (STRICT JSON):
 {
@@ -489,7 +567,8 @@ OUTPUT FORMAT (STRICT JSON):
   "score": <number 0-100>,
   "comments": "Overall summary of their performance on this question.",
   "strengths": "Specific core concepts they explained well.",
-  "weakAreas": "Specific gaps, misunderstandings, or missing details."
+  "weakAreas": "Specific gaps, misunderstandings, or missing details.",
+  "improvements": "Recommended solution, core mechanics, and optimal conceptual answer."
 }`;
     }
 
@@ -499,38 +578,64 @@ OUTPUT FORMAT (STRICT JSON):
     ];
 
     const rawResponse = await callGroqAPI(messages, true);
-    return cleanJSONResponse(rawResponse);
+    const parsed = cleanJSONResponse(rawResponse);
+    
+    const rawScore = typeof parsed.score === 'number' ? parsed.score : (parseInt(parsed.score, 10) || 0);
+    const boundedScore = Math.max(0, Math.min(100, rawScore));
+    const maxScore = 100;
+    const percentage = Math.round((boundedScore / maxScore) * 100);
+
+    return {
+      correctness: Math.max(0, Math.min(100, Number(parsed.correctness) || boundedScore)),
+      technicalAccuracy: Math.max(0, Math.min(100, Number(parsed.technicalAccuracy) || boundedScore)),
+      completeness: Math.max(0, Math.min(100, Number(parsed.completeness) || boundedScore)),
+      score: boundedScore,
+      maxScore: maxScore,
+      percentage: percentage,
+      comments: parsed.comments || 'Evaluated successfully.',
+      strengths: parsed.strengths || 'Demonstrated foundational familiarity with the topic.',
+      weakAreas: parsed.weakAreas || 'Could provide more detailed technical specifics.',
+      improvements: parsed.improvements || expectedAnswer || `Review official ${technology} documentation and architecture best practices.`
+    };
   } catch (error) {
-    console.error('[FALLBACK] Using mock answer evaluation due to API failure.');
+    console.error('[FALLBACK] Using mock answer evaluation due to API failure:', error.message);
     return getMockEvaluation(questionData, answer);
   }
 };
 
 exports.generateOverallReport = async (technology, difficulty, questions = []) => {
   try {
+    const evaluatedQuestions = questions.filter(q => q.feedback && q.feedback.score !== undefined);
+    const calculatedAvg = evaluatedQuestions.length > 0
+      ? Math.round(evaluatedQuestions.reduce((sum, q) => sum + (q.feedback?.score || 0), 0) / evaluatedQuestions.length)
+      : 0;
+
     const interviewData = questions.map((q, idx) => {
       return `Question ${idx + 1}: ${q.questionText}
 Candidate Answer: ${q.answerText}
 Score: ${q.feedback?.score || 0}/100
-Evaluator Comments: ${q.feedback?.comments || ''}`;
+Evaluator Comments: ${q.feedback?.comments || ''}
+Strengths: ${q.feedback?.strengths || ''}
+Weak Areas: ${q.feedback?.weakAreas || ''}`;
     }).join('\n\n');
 
     const prompt = `You are a principal engineer reviewing a candidate's full interview performance.
 Technology: ${technology}
 Difficulty: ${difficulty}
+Overall Average Score: ${calculatedAvg}/100
 
 INTERVIEW TRANSCRIPT & EVALUATIONS:
 ${interviewData}
 
 INSTRUCTIONS:
 1. Provide a comprehensive summary of the candidate's performance.
-2. Calculate a fair overall score (0-100).
+2. Return the overall score (0-100), which should be close to or equal to ${calculatedAvg}.
 3. Identify top strengths and critical weak areas.
 4. Provide an actionable learning path.
 
 OUTPUT FORMAT (STRICT JSON):
 {
-  "score": <number 0-100>,
+  "score": ${calculatedAvg},
   "strengths": ["Strength 1", "Strength 2"],
   "weakAreas": ["Weakness 1", "Weakness 2"],
   "studyTopics": ["Topic 1", "Topic 2"],
@@ -548,9 +653,20 @@ OUTPUT FORMAT (STRICT JSON):
     ];
 
     const rawResponse = await callGroqAPI(messages, true);
-    return cleanJSONResponse(rawResponse);
+    const parsed = cleanJSONResponse(rawResponse);
+    const finalScore = typeof parsed.score === 'number' ? Math.max(0, Math.min(100, parsed.score)) : calculatedAvg;
+
+    return {
+      score: finalScore,
+      strengths: Array.isArray(parsed.strengths) && parsed.strengths.length > 0 ? parsed.strengths : ["Demonstrated technical foundation in " + technology],
+      weakAreas: Array.isArray(parsed.weakAreas) && parsed.weakAreas.length > 0 ? parsed.weakAreas : ["Deepen understanding of edge cases and internal mechanics"],
+      studyTopics: Array.isArray(parsed.studyTopics) && parsed.studyTopics.length > 0 ? parsed.studyTopics : [technology + " Architecture", "Performance Optimization"],
+      learningPath: Array.isArray(parsed.learningPath) && parsed.learningPath.length > 0 ? parsed.learningPath : [
+        { step: "Deepen Core Theory", description: "Review official " + technology + " documentation." }
+      ]
+    };
   } catch (error) {
-    console.error('[FALLBACK] Using mock overall report generator due to API failure.');
+    console.error('[FALLBACK] Using mock overall report generator due to API failure:', error.message);
     return getMockReport(questions);
   }
 };

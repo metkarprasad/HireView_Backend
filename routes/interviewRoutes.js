@@ -1,11 +1,12 @@
-const express = require('express');
 const {
   startInterview,
   submitAnswer,
+  completeInterview,
   getHistory,
   getInterviewDetails,
   getAnalytics,
 } = require('../controllers/interviewController');
+const express = require("express")
 const {
   cancelInterview,
   rescheduleInterview,
@@ -27,6 +28,7 @@ router.use(protect);
 // Interview lifecycle endpoints
 router.post('/start', startInterview);
 router.post('/submit', submitAnswer);
+router.post('/:id/complete', completeInterview);
 router.get('/history', getHistory);
 router.get('/analytics/dashboard', getAnalytics);
 router.get('/:id', getInterviewDetails);

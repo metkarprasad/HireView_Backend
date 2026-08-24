@@ -5,8 +5,10 @@
 const jwt = require('jsonwebtoken');
 const { emitToRoom } = require('../services/socketService');
 const Interview = require('../models/Interview');
+const InterviewAttempt = require('../models/InterviewAttempt');
 const groqService = require('../services/groqService');
 const progressionService = require('../services/interviewProgression');
+const { finalizeInterviewCompletion, QUESTION_LIMIT } = require('../controllers/interviewController');
 
 module.exports = (io) => {
   // Authenticate each socket connection
@@ -63,12 +65,16 @@ module.exports = (io) => {
 
     // Submit answer from client
     socket.on('submitAnswer', async ({ interviewId, attemptId, answer }) => {
-      // NOTE: LiveInterview.jsx passes { interviewId, attemptId, answer }
       if (!interviewId || !answer) return;
       
       try {
         const interview = await Interview.findById(interviewId);
-        if (!interview || interview.status === 'completed') return;
+        if (!interview) return;
+
+        if (interview.status === 'completed') {
+          emitToRoom(io, interviewId, 'interviewCompleted', interview.overallFeedback);
+          return;
+        }
 
         const currentQuestionIndex = interview.questions.length - 1;
         const currentQuestion = interview.questions[currentQuestionIndex];
@@ -85,7 +91,9 @@ module.exports = (io) => {
           feedback = await groqService.evaluateAnswer(
             { 
               questionText: currentQuestion.questionText, 
-              expectedAnswer: currentQuestion.expectedAnswer 
+              expectedAnswer: currentQuestion.expectedAnswer,
+              questionType: currentQuestion.questionType,
+              codingRequired: currentQuestion.codingRequired
             }, 
             answer, 
             interview.technology, 
@@ -113,7 +121,7 @@ module.exports = (io) => {
             feedback.score || 0,
             interview.questions.length,
             interview.difficulty,
-            5
+            QUESTION_LIMIT
           );
         }
         interview.currentPhase = nextPhase;
@@ -122,7 +130,9 @@ module.exports = (io) => {
         const timeRemainingMs = (interview.endsAt ? interview.endsAt.getTime() : (interview.startedAt || interview.createdAt).getTime() + (interview.duration || 1) * 60 * 60 * 1000) - currentTime.getTime();
         const timeRemaining = Math.max(0, timeRemainingMs / 60000); // in minutes
 
-        if (timeRemaining > 0) {
+        const limit = QUESTION_LIMIT || 5;
+
+        if (interview.questions.length < limit && timeRemaining > 0) {
           // Get next adaptive question
           let nextQuestionData;
           if (interview.interviewType === 'HR') {
@@ -132,7 +142,7 @@ module.exports = (io) => {
               interview.currentPhase,
               interview.questions,
               timeRemaining,
-              0, // retryCount
+              0,
               interview.interviewerConfig?.style || 'Professional'
             );
           } else {
@@ -142,7 +152,7 @@ module.exports = (io) => {
               interview.experience || 0,
               interview.currentPhase,
               interview.questions,
-              0, // retryCount
+              0,
               timeRemaining,
               interview.interviewerConfig?.style || 'Professional'
             );
@@ -156,6 +166,9 @@ module.exports = (io) => {
             topic: nextQuestionData.topic || '',
             skillsTested: nextQuestionData.skillsTested || [],
             questionType: nextQuestionData.questionType || 'conceptual',
+            codingRequired: nextQuestionData.codingRequired || false,
+            language: nextQuestionData.language || '',
+            starterCode: nextQuestionData.starterCode || '',
             answerText: '',
           });
 
@@ -163,26 +176,9 @@ module.exports = (io) => {
           // Emit the full object so frontend can check questionType
           emitToRoom(io, interviewId, 'question', interview.questions[interview.questions.length - 1]);
         } else {
-          // Interview completed
-          interview.status = 'completed';
-          let report;
-          if (interview.interviewType === 'HR') {
-            report = await groqService.generateOverallHRReport(
-              interview.difficulty,
-              interview.questions
-            );
-          } else {
-            report = await groqService.generateOverallReport(
-              interview.technology,
-              interview.difficulty,
-              interview.questions
-            );
-          }
-          
-          interview.overallFeedback = report;
-          await interview.save();
-          
-          emitToRoom(io, interviewId, 'interviewCompleted', report);
+          // Complete the interview session
+          const overallReport = await finalizeInterviewCompletion(interview, socket.user?.id || interview.userId);
+          emitToRoom(io, interviewId, 'interviewCompleted', overallReport);
         }
       } catch (err) {
         console.error('Socket submitAnswer error:', err);
@@ -195,7 +191,12 @@ module.exports = (io) => {
       
       try {
         const interview = await Interview.findById(interviewId);
-        if (!interview || interview.status === 'completed') return;
+        if (!interview) return;
+
+        if (interview.status === 'completed') {
+          emitToRoom(io, interviewId, 'interviewCompleted', interview.overallFeedback);
+          return;
+        }
 
         const currentQuestionIndex = interview.questions.length - 1;
         const currentQuestion = interview.questions[currentQuestionIndex];
@@ -207,16 +208,21 @@ module.exports = (io) => {
           technicalAccuracy: 0,
           completeness: 0,
           score: 0,
+          maxScore: 100,
+          percentage: 0,
           comments: "Candidate skipped this question.",
           strengths: "N/A",
-          weakAreas: "Question was skipped."
+          weakAreas: "Question was skipped.",
+          improvements: currentQuestion.expectedAnswer ? `Recommended Approach: ${currentQuestion.expectedAnswer}` : "Review official documentation."
         };
 
         const currentTime = new Date();
         const timeRemainingMs = (interview.endsAt ? interview.endsAt.getTime() : (interview.startedAt || interview.createdAt).getTime() + (interview.duration || 1) * 60 * 60 * 1000) - currentTime.getTime();
         const timeRemaining = Math.max(0, timeRemainingMs / 60000); // in minutes
 
-        if (timeRemaining > 0) {
+        const limit = QUESTION_LIMIT || 5;
+
+        if (interview.questions.length < limit && timeRemaining > 0) {
           let nextQuestionData;
           if (interview.interviewType === 'HR') {
             nextQuestionData = await groqService.generateHRQuestion(
@@ -225,7 +231,7 @@ module.exports = (io) => {
               interview.currentPhase || 'greeting',
               interview.questions,
               timeRemaining,
-              0, // retryCount
+              0,
               interview.interviewerConfig?.style || 'Professional'
             );
           } else {
@@ -235,7 +241,7 @@ module.exports = (io) => {
               interview.experience || 0,
               interview.currentPhase || 'fundamentals',
               interview.questions,
-              0, // retryCount
+              0,
               timeRemaining,
               interview.interviewerConfig?.style || 'Professional'
             );
@@ -249,6 +255,9 @@ module.exports = (io) => {
             topic: nextQuestionData.topic || '',
             skillsTested: nextQuestionData.skillsTested || [],
             questionType: nextQuestionData.questionType || 'conceptual',
+            codingRequired: nextQuestionData.codingRequired || false,
+            language: nextQuestionData.language || '',
+            starterCode: nextQuestionData.starterCode || '',
             answerText: '',
           });
 
@@ -256,36 +265,32 @@ module.exports = (io) => {
           // Emit the full object
           emitToRoom(io, interviewId, 'question', interview.questions[interview.questions.length - 1]);
         } else {
-          interview.status = 'completed';
-          let report;
-          if (interview.interviewType === 'HR') {
-            report = await groqService.generateOverallHRReport(
-              interview.difficulty,
-              interview.questions
-            );
-          } else {
-            report = await groqService.generateOverallReport(
-              interview.technology,
-              interview.difficulty,
-              interview.questions
-            );
-          }
-          
-          interview.overallFeedback = report;
-          await interview.save();
-          
-          emitToRoom(io, interviewId, 'interviewCompleted', report);
+          const overallReport = await finalizeInterviewCompletion(interview, socket.user?.id || interview.userId);
+          emitToRoom(io, interviewId, 'interviewCompleted', overallReport);
         }
       } catch (err) {
         console.error('Socket skipQuestion error:', err);
       }
     });
+
+    // End / Complete interview event from client
+    socket.on('endInterview', async ({ interviewId, attemptId }) => {
+      if (!interviewId) return;
+      try {
+        const interview = await Interview.findById(interviewId);
+        if (!interview) return;
+
+        const overallReport = await finalizeInterviewCompletion(interview, socket.user?.id || interview.userId);
+        emitToRoom(io, interviewId, 'interviewCompleted', overallReport);
+      } catch (err) {
+        console.error('Socket endInterview error:', err);
+      }
+    });
     
-    // New handler for real-time candidate transcript
+    // Handler for real-time candidate transcript
     socket.on('answerCandidate', async ({ interviewId, transcript }) => {
       if (!interviewId) return;
-      // Generate next question using AI service based on transcript
-      const nextQuestion = await require('../services/groqService').generateQuestion('General', 'Intermediate', [{ questionText: transcript }]);
+      const nextQuestion = await require('../services/groqService').generateQuestion('General', 'Intermediate', 0, 'fundamentals', [{ questionText: transcript }]);
       emitToRoom(io, interviewId, 'question', nextQuestion);
     });
     

@@ -59,9 +59,20 @@ const QuestionSchema = new mongoose.Schema({
       max: 100,
       default: 0
     },
-    comments: String,
-    strengths: String,
-    weakAreas: String,
+    maxScore: {
+      type: Number,
+      default: 100
+    },
+    percentage: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 0
+    },
+    comments: { type: String, default: '' },
+    strengths: { type: String, default: '' },
+    weakAreas: { type: String, default: '' },
+    improvements: { type: String, default: '' },
   },
 });
 

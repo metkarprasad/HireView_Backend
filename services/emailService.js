@@ -227,6 +227,104 @@ const sendInterviewReschedule = async (toEmail, interview) => {
 };
 
 /**
+ * Send Email Verification OTP
+ * @param {string} toEmail Recipient email
+ * @param {string} username Candidate name
+ * @param {string} otp 6-digit OTP code
+ */
+const sendVerificationEmail = async (toEmail, username, otp) => {
+  const subject = `Your HireView Verification Code: ${otp}`;
+  const textContent = `Hi ${username || 'there'},\n\nYour 6-digit email verification code is: ${otp}\n\nThis code will expire in 10 minutes. Please do not share this code with anyone.\n\nBest regards,\nThe HireView Team`;
+
+  const htmlContent = `
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff;">
+      <div style="text-align: center; margin-bottom: 24px;">
+        <h2 style="color: #4f46e5; margin: 0; font-size: 24px; font-weight: 800;">HireView AI</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 4px;">Smart AI Interview Platform</p>
+      </div>
+      <h3 style="color: #1e293b; font-size: 18px; margin-bottom: 12px;">Verify Your Email Address</h3>
+      <p style="font-size: 15px; color: #334155; line-height: 1.6;">Hi <strong>${username || 'Candidate'}</strong>,</p>
+      <p style="font-size: 15px; color: #334155; line-height: 1.6;">Thank you for signing up for HireView. Use the following 6-digit verification code to complete your registration:</p>
+      
+      <div style="background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%); padding: 20px; margin: 24px 0; border-radius: 12px; text-align: center;">
+        <span style="font-size: 32px; font-weight: 800; letter-spacing: 8px; color: #ffffff; font-family: monospace;">${otp}</span>
+      </div>
+
+      <p style="font-size: 13px; color: #64748b; line-height: 1.5;">This verification code is valid for <strong>10 minutes</strong>. If you did not create a HireView account, please ignore this email.</p>
+      <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+      <p style="font-size: 12px; color: #94a3b8; text-align: center; margin: 0;">&copy; ${new Date().getFullYear()} HireView AI. All rights reserved.</p>
+    </div>
+  `;
+
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: `"${process.env.SMTP_FROM_NAME || 'HireView'}" <${process.env.SMTP_FROM_EMAIL || 'no-reply@hireview.com'}>`,
+        to: toEmail,
+        subject,
+        text: textContent,
+        html: htmlContent,
+      });
+      console.log(`[EMAIL SUCCESS] Sent verification OTP to ${toEmail}`);
+    } catch (err) {
+      console.error(`[EMAIL ERROR] Failed to send verification OTP to ${toEmail}:`, err.message);
+      logEmailToFile(toEmail, subject, textContent);
+    }
+  } else {
+    logEmailToFile(toEmail, subject, textContent);
+  }
+};
+
+/**
+ * Send Password Reset OTP
+ * @param {string} toEmail Recipient email
+ * @param {string} username Candidate name
+ * @param {string} otp 6-digit OTP code
+ */
+const sendPasswordResetOtpEmail = async (toEmail, username, otp) => {
+  const subject = `Your Password Reset Code: ${otp}`;
+  const textContent = `Hi ${username || 'there'},\n\nWe received a request to reset your HireView account password. Your 6-digit reset code is: ${otp}\n\nThis code will expire in 10 minutes. If you did not request a password reset, please secure your account immediately.\n\nBest regards,\nThe HireView Team`;
+
+  const htmlContent = `
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff;">
+      <div style="text-align: center; margin-bottom: 24px;">
+        <h2 style="color: #4f46e5; margin: 0; font-size: 24px; font-weight: 800;">HireView AI</h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 4px;">Password Reset Request</p>
+      </div>
+      <h3 style="color: #1e293b; font-size: 18px; margin-bottom: 12px;">Reset Your Password</h3>
+      <p style="font-size: 15px; color: #334155; line-height: 1.6;">Hi <strong>${username || 'Candidate'}</strong>,</p>
+      <p style="font-size: 15px; color: #334155; line-height: 1.6;">We received a request to reset your account password. Enter the 6-digit verification code below:</p>
+      
+      <div style="background: linear-gradient(135deg, #e11d48 0%, #f43f5e 100%); padding: 20px; margin: 24px 0; border-radius: 12px; text-align: center;">
+        <span style="font-size: 32px; font-weight: 800; letter-spacing: 8px; color: #ffffff; font-family: monospace;">${otp}</span>
+      </div>
+
+      <p style="font-size: 13px; color: #64748b; line-height: 1.5;">This code will expire in <strong>10 minutes</strong>. If you did not request a password reset, you can safely ignore this email.</p>
+      <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+      <p style="font-size: 12px; color: #94a3b8; text-align: center; margin: 0;">&copy; ${new Date().getFullYear()} HireView AI. All rights reserved.</p>
+    </div>
+  `;
+
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: `"${process.env.SMTP_FROM_NAME || 'HireView'}" <${process.env.SMTP_FROM_EMAIL || 'no-reply@hireview.com'}>`,
+        to: toEmail,
+        subject,
+        text: textContent,
+        html: htmlContent,
+      });
+      console.log(`[EMAIL SUCCESS] Sent password reset OTP to ${toEmail}`);
+    } catch (err) {
+      console.error(`[EMAIL ERROR] Failed to send password reset OTP to ${toEmail}:`, err.message);
+      logEmailToFile(toEmail, subject, textContent);
+    }
+  } else {
+    logEmailToFile(toEmail, subject, textContent);
+  }
+};
+
+/**
  * Helper to send generic email using existing transporter or fallback
  */
 const sendGenericEmail = async (toEmail, subject, textContent) => {
@@ -237,7 +335,6 @@ const sendGenericEmail = async (toEmail, subject, textContent) => {
         to: toEmail,
         subject,
         text: textContent,
-        // no HTML needed for simple messages
       });
       console.log(`[EMAIL SUCCESS] Sent ${subject} to ${toEmail}`);
     } catch (err) {
@@ -254,5 +351,7 @@ module.exports = {
   sendInterviewConfirmation,
   sendInterviewCancellation,
   sendInterviewReschedule,
+  sendVerificationEmail,
+  sendPasswordResetOtpEmail,
 };
 
