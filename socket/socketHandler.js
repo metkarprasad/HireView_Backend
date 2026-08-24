@@ -36,7 +36,9 @@ module.exports = (io) => {
       socket.join(interviewId);
       console.log(`Socket ${socket.id} joined interview ${interviewId}`);
       try {
-        const interview = await Interview.findById(interviewId);
+        const query = { _id: interviewId };
+        if (socket.user?.id) query.userId = socket.user.id;
+        const interview = await Interview.findOne(query);
         if (interview) {
           emitToRoom(io, interviewId, 'attemptCreated', { 
             id: interview._id,
@@ -53,7 +55,9 @@ module.exports = (io) => {
     socket.on('startInterview', async ({ interviewId }) => {
       if (!interviewId) return;
       try {
-        const interview = await Interview.findById(interviewId);
+        const query = { _id: interviewId };
+        if (socket.user?.id) query.userId = socket.user.id;
+        const interview = await Interview.findOne(query);
         if (interview && interview.questions.length > 0) {
           const firstQuestion = interview.questions[0];
           emitToRoom(io, interviewId, 'question', firstQuestion);
@@ -68,7 +72,9 @@ module.exports = (io) => {
       if (!interviewId || !answer) return;
       
       try {
-        const interview = await Interview.findById(interviewId);
+        const query = { _id: interviewId };
+        if (socket.user?.id) query.userId = socket.user.id;
+        const interview = await Interview.findOne(query);
         if (!interview) return;
 
         if (interview.status === 'completed') {
@@ -190,7 +196,9 @@ module.exports = (io) => {
       if (!interviewId) return;
       
       try {
-        const interview = await Interview.findById(interviewId);
+        const query = { _id: interviewId };
+        if (socket.user?.id) query.userId = socket.user.id;
+        const interview = await Interview.findOne(query);
         if (!interview) return;
 
         if (interview.status === 'completed') {
@@ -277,7 +285,9 @@ module.exports = (io) => {
     socket.on('endInterview', async ({ interviewId, attemptId }) => {
       if (!interviewId) return;
       try {
-        const interview = await Interview.findById(interviewId);
+        const query = { _id: interviewId };
+        if (socket.user?.id) query.userId = socket.user.id;
+        const interview = await Interview.findOne(query);
         if (!interview) return;
 
         const overallReport = await finalizeInterviewCompletion(interview, socket.user?.id || interview.userId);

@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const axios = require('axios');
 const emailService = require('../services/emailService');
 
 // Helper to generate 6-digit secure numeric OTP
@@ -455,5 +456,202 @@ exports.updateProfile = async (req, res, next) => {
     });
   } catch (error) {
     next(error);
+  }
+};
+
+// @desc    Initiate Google OAuth 2.0 / OpenID Connect Login Flow
+// @route   GET /api/auth/google
+// @access  Public
+exports.googleAuth = async (req, res, next) => {
+  try {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+    if (!clientId || !clientSecret) {
+      console.warn('[GOOGLE OAUTH] GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing from environment.');
+      return res.redirect(`${frontendUrl}/login?error=google_not_configured`);
+    }
+
+    // Determine callback URL
+    const callbackUrl =
+      process.env.GOOGLE_CALLBACK_URL ||
+      `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
+
+    // Generate tamper-proof signed CSRF state
+    const rawState = crypto.randomBytes(16).toString('hex');
+    const secret = process.env.JWT_SECRET || 'supersecretkey123';
+    const hmacSig = crypto.createHmac('sha256', secret).update(rawState).digest('hex');
+    const state = `${rawState}.${hmacSig}`;
+
+    const googleAuthUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    googleAuthUrl.searchParams.set('client_id', clientId);
+    googleAuthUrl.searchParams.set('redirect_uri', callbackUrl);
+    googleAuthUrl.searchParams.set('response_type', 'code');
+    googleAuthUrl.searchParams.set('scope', 'openid email profile');
+    googleAuthUrl.searchParams.set('access_type', 'offline');
+    googleAuthUrl.searchParams.set('prompt', 'select_account');
+    googleAuthUrl.searchParams.set('state', state);
+
+    return res.redirect(googleAuthUrl.toString());
+  } catch (error) {
+    console.error('[GOOGLE OAUTH ERROR] Failed to initiate Google Auth:', error.message);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    return res.redirect(`${frontendUrl}/login?error=google_failed`);
+  }
+};
+
+// @desc    Handle Google OAuth 2.0 Callback
+// @route   GET /api/auth/google/callback
+// @access  Public
+exports.googleCallback = async (req, res, next) => {
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+  try {
+    const { code, state, error: oauthError } = req.query;
+
+    if (oauthError) {
+      console.warn('[GOOGLE OAUTH] User cancelled or OAuth error returned:', oauthError);
+      return res.redirect(`${frontendUrl}/login?error=google_cancelled`);
+    }
+
+    if (!code) {
+      return res.redirect(`${frontendUrl}/login?error=missing_code`);
+    }
+
+    // Validate CSRF state signature
+    if (!state || !state.includes('.')) {
+      console.warn('[GOOGLE OAUTH] Missing or malformed state parameter in callback');
+      return res.redirect(`${frontendUrl}/login?error=invalid_state`);
+    }
+
+    const [rawState, sig] = state.split('.');
+    const secret = process.env.JWT_SECRET || 'supersecretkey123';
+    const expectedSig = crypto.createHmac('sha256', secret).update(rawState).digest('hex');
+
+    if (sig !== expectedSig) {
+      console.warn('[GOOGLE OAUTH] Invalid CSRF state signature received');
+      return res.redirect(`${frontendUrl}/login?error=invalid_state`);
+    }
+
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    const callbackUrl =
+      process.env.GOOGLE_CALLBACK_URL ||
+      `${req.protocol}://${req.get('host')}/api/auth/google/callback`;
+
+    // 1. Exchange authorization code for Google access token
+    const tokenResponse = await axios.post(
+      'https://oauth2.googleapis.com/token',
+      new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: callbackUrl,
+        grant_type: 'authorization_code',
+      }).toString(),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        timeout: 10000,
+      }
+    );
+
+    const { access_token } = tokenResponse.data;
+
+    // 2. Fetch authenticated user profile from Google OpenID Userinfo
+    const profileResponse = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+      },
+      timeout: 10000,
+    });
+
+    const googleProfile = profileResponse.data;
+
+    if (!googleProfile || !googleProfile.email) {
+      console.warn('[GOOGLE OAUTH] Google profile is missing verified email');
+      return res.redirect(`${frontendUrl}/login?error=missing_email`);
+    }
+
+    const normalizedEmail = googleProfile.email.toLowerCase().trim();
+    const googleId = googleProfile.sub;
+    const profileImage = googleProfile.picture || '';
+
+    // 3. Find or create user
+    let user = await User.findOne({ googleId });
+
+    if (!user) {
+      // Check if user exists with matching verified email
+      user = await User.findOne({ email: normalizedEmail });
+
+      if (user) {
+        // Link Google ID to existing account
+        user.googleId = googleId;
+        if (profileImage && !user.profileImage) {
+          user.profileImage = profileImage;
+        }
+        // Google has verified this email
+        user.emailVerified = true;
+        user.status = 'ACTIVE';
+        await user.save();
+      } else {
+        // Generate a clean, unique username
+        const baseName = (googleProfile.name || normalizedEmail.split('@')[0])
+          .replace(/[^a-zA-Z0-9_\s]/g, '')
+          .trim() || 'candidate';
+
+        let candidateUsername = baseName;
+        let counter = 1;
+        while (await User.findOne({ username: candidateUsername })) {
+          candidateUsername = `${baseName}_${Math.floor(1000 + Math.random() * 9000)}`;
+          counter++;
+          if (counter > 10) {
+            candidateUsername = `${baseName}_${Date.now()}`;
+            break;
+          }
+        }
+
+        user = new User({
+          username: candidateUsername,
+          email: normalizedEmail,
+          googleId,
+          profileImage,
+          emailVerified: true,
+          status: 'ACTIVE',
+          authProvider: 'google',
+        });
+        await user.save();
+      }
+    } else {
+      // Existing Google user - ensure active status
+      if (!user.emailVerified || user.status === 'PENDING_VERIFICATION') {
+        user.emailVerified = true;
+        user.status = 'ACTIVE';
+        await user.save();
+      }
+    }
+
+    // 4. Generate standard HireView JWT token
+    const token = generateToken(user._id);
+
+    const userData = {
+      id: user._id,
+      username: user.username,
+      email: user.email,
+      emailVerified: user.emailVerified,
+      profileImage: user.profileImage || profileImage || '',
+    };
+
+    // 5. Securely hand off token to frontend via URL params
+    const redirectUrl = new URL(`${frontendUrl}/login`);
+    redirectUrl.searchParams.set('google_token', token);
+    redirectUrl.searchParams.set('user', JSON.stringify(userData));
+
+    return res.redirect(redirectUrl.toString());
+  } catch (error) {
+    console.error('[GOOGLE OAUTH ERROR] Callback failed:', error.response?.data || error.message);
+    return res.redirect(`${frontendUrl}/login?error=google_failed`);
   }
 };
