@@ -271,6 +271,17 @@ exports.login = async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
+    // Check if account was registered with Google (no password set)
+    if (!user.password) {
+      if (user.googleId || user.authProvider === 'google') {
+        return res.status(400).json({
+          success: false,
+          message: 'This account was registered using Google Sign-In. Please click "Continue with Google" to sign in.',
+        });
+      }
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
     // Check if password matches
     const isMatch = await user.matchPassword(password);
     if (!isMatch) {
@@ -578,6 +589,7 @@ exports.googleCallback = async (req, res, next) => {
     const normalizedEmail = googleProfile.email.toLowerCase().trim();
     const googleId = googleProfile.sub;
     const profileImage = googleProfile.picture || '';
+    const cleanName = (googleProfile.name || normalizedEmail.split('@')[0]).trim() || 'Candidate';
 
     // 3. Find or create user
     let user = await User.findOne({ googleId });
@@ -595,22 +607,22 @@ exports.googleCallback = async (req, res, next) => {
         // Google has verified this email
         user.emailVerified = true;
         user.status = 'ACTIVE';
+
+        // Restore clean original name if available without conflict
+        const existingUsernameOwner = await User.findOne({ username: cleanName, _id: { $ne: user._id } });
+        if (!existingUsernameOwner) {
+          user.username = cleanName;
+        }
+
         await user.save();
       } else {
-        // Generate a clean, unique username
-        const baseName = (googleProfile.name || normalizedEmail.split('@')[0])
-          .replace(/[^a-zA-Z0-9_\s]/g, '')
-          .trim() || 'candidate';
-
-        let candidateUsername = baseName;
-        let counter = 1;
-        while (await User.findOne({ username: candidateUsername })) {
-          candidateUsername = `${baseName}_${Math.floor(1000 + Math.random() * 9000)}`;
-          counter++;
-          if (counter > 10) {
-            candidateUsername = `${baseName}_${Date.now()}`;
-            break;
-          }
+        // Use clean original name directly without adding random numbers
+        let candidateUsername = cleanName;
+        const existingUserWithUsername = await User.findOne({ username: candidateUsername });
+        if (existingUserWithUsername) {
+          const emailPrefix = normalizedEmail.split('@')[0];
+          const existingPrefix = await User.findOne({ username: emailPrefix });
+          candidateUsername = existingPrefix ? cleanName : emailPrefix;
         }
 
         user = new User({
@@ -625,12 +637,22 @@ exports.googleCallback = async (req, res, next) => {
         await user.save();
       }
     } else {
-      // Existing Google user - ensure active status
+      // Existing Google user - ensure active status and restore clean original name
       if (!user.emailVerified || user.status === 'PENDING_VERIFICATION') {
         user.emailVerified = true;
         user.status = 'ACTIVE';
-        await user.save();
       }
+
+      // Restore clean original name if available without conflict
+      const existingUsernameOwner = await User.findOne({ username: cleanName, _id: { $ne: user._id } });
+      if (!existingUsernameOwner) {
+        user.username = cleanName;
+      }
+
+      if (profileImage && !user.profileImage) {
+        user.profileImage = profileImage;
+      }
+      await user.save();
     }
 
     // 4. Generate standard HireView JWT token
